@@ -1,0 +1,880 @@
+{
+	"$schema": "http://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
+	"contentVersion": "1.0.0.0",
+	"parameters": {
+		"factoryName": {
+			"type": "string",
+			"metadata": "Data Factory name"
+		},
+		"AzureDatabricksPAE": {
+			"type": "string"
+		},
+		"AxionCardServer": {
+			"type": "string"
+		},
+		"AzureDataLakeComercial": {
+			"type": "string"
+		}
+	},
+	"variables": {
+		"factoryId": "[concat('Microsoft.DataFactory/factories/', parameters('factoryName'))]"
+	},
+	"resources": [
+		{
+			"name": "[concat(parameters('factoryName'), '/AxionCard_Ingestion')]",
+			"type": "Microsoft.DataFactory/factories/pipelines",
+			"apiVersion": "2018-06-01",
+			"properties": {
+				"activities": [
+					{
+						"name": "GetFileList",
+						"type": "GetMetadata",
+						"dependsOn": [],
+						"policy": {
+							"timeout": "7.00:00:00",
+							"retry": 0,
+							"retryIntervalInSeconds": 30,
+							"secureOutput": false,
+							"secureInput": false
+						},
+						"userProperties": [],
+						"typeProperties": {
+							"dataset": {
+								"referenceName": "AxionCard_folder",
+								"type": "DatasetReference"
+							},
+							"fieldList": [
+								"childItems"
+							],
+							"storeSettings": {
+								"type": "FileServerReadSettings",
+								"recursive": true
+							},
+							"formatSettings": {
+								"type": "DelimitedTextReadSettings"
+							}
+						}
+					},
+					{
+						"name": "FilterFiles",
+						"type": "Filter",
+						"dependsOn": [
+							{
+								"activity": "GetFileList",
+								"dependencyConditions": [
+									"Succeeded"
+								]
+							}
+						],
+						"userProperties": [],
+						"typeProperties": {
+							"items": {
+								"value": "@activity('GetFileList').output.childItems",
+								"type": "Expression"
+							},
+							"condition": {
+								"value": "@equals(item().type, 'File')",
+								"type": "Expression"
+							}
+						}
+					},
+					{
+						"name": "ForEach1",
+						"type": "ForEach",
+						"dependsOn": [
+							{
+								"activity": "FilterFiles",
+								"dependencyConditions": [
+									"Succeeded"
+								]
+							}
+						],
+						"userProperties": [],
+						"typeProperties": {
+							"items": {
+								"value": "@activity('FilterFiles').output.value",
+								"type": "Expression"
+							},
+							"batchCount": 20,
+							"activities": [
+								{
+									"name": "CopyFileToLanding",
+									"type": "Copy",
+									"dependsOn": [],
+									"policy": {
+										"timeout": "7.00:00:00",
+										"retry": 0,
+										"retryIntervalInSeconds": 30,
+										"secureOutput": false,
+										"secureInput": false
+									},
+									"userProperties": [],
+									"typeProperties": {
+										"source": {
+											"type": "DelimitedTextSource",
+											"storeSettings": {
+												"type": "FileServerReadSettings",
+												"recursive": true,
+												"enablePartitionDiscovery": false
+											},
+											"formatSettings": {
+												"type": "DelimitedTextReadSettings"
+											}
+										},
+										"sink": {
+											"type": "ParquetSink",
+											"storeSettings": {
+												"type": "AzureBlobFSWriteSettings"
+											}
+										},
+										"enableStaging": false,
+										"enableSkipIncompatibleRow": true
+									},
+									"inputs": [
+										{
+											"referenceName": "AxionCard_file",
+											"type": "DatasetReference",
+											"parameters": {
+												"filename": {
+													"value": "@item().name",
+													"type": "Expression"
+												}
+											}
+										}
+									],
+									"outputs": [
+										{
+											"referenceName": "parquet_sink",
+											"type": "DatasetReference",
+											"parameters": {
+												"filename": {
+													"value": "@toLower(replace(item().name,'.csv', ''))",
+													"type": "Expression"
+												},
+												"source": "axionCard",
+												"container": "dlc-pae",
+												"zone": "landing",
+												"path": "current"
+											}
+										}
+									]
+								},
+								{
+									"name": "GetFileListStructured",
+									"type": "GetMetadata",
+									"dependsOn": [
+										{
+											"activity": "CopyFileToLanding",
+											"dependencyConditions": [
+												"Succeeded"
+											]
+										}
+									],
+									"policy": {
+										"timeout": "7.00:00:00",
+										"retry": 0,
+										"retryIntervalInSeconds": 30,
+										"secureOutput": false,
+										"secureInput": false
+									},
+									"userProperties": [],
+									"typeProperties": {
+										"dataset": {
+											"referenceName": "Parquet_folder",
+											"type": "DatasetReference",
+											"parameters": {
+												"source": {
+													"value": "@concat('axionCard/', toLower(replace(item().name,'.csv', '.parquet')))",
+													"type": "Expression"
+												},
+												"container": "dlc-pae",
+												"zone": "structured"
+											}
+										},
+										"fieldList": [
+											"exists"
+										],
+										"storeSettings": {
+											"type": "AzureBlobFSReadSettings",
+											"recursive": true
+										}
+									}
+								},
+								{
+									"name": "IfConditionStructured",
+									"type": "IfCondition",
+									"dependsOn": [
+										{
+											"activity": "GetFileListStructured",
+											"dependencyConditions": [
+												"Succeeded"
+											]
+										}
+									],
+									"userProperties": [],
+									"typeProperties": {
+										"expression": {
+											"value": "@activity('GetFileListStructured').output.exists",
+											"type": "Expression"
+										},
+										"ifFalseActivities": [
+											{
+												"name": "WriteDirectlyToStructured",
+												"type": "DatabricksNotebook",
+												"dependsOn": [],
+												"policy": {
+													"timeout": "7.00:00:00",
+													"retry": 0,
+													"retryIntervalInSeconds": 30,
+													"secureOutput": false,
+													"secureInput": false
+												},
+												"userProperties": [],
+												"typeProperties": {
+													"notebookPath": "/Shared/AxionCard/axionCardFileStructured",
+													"baseParameters": {
+														"filename": {
+															"value": "@toLower(replace(item().name,'.csv', '.parquet'))",
+															"type": "Expression"
+														},
+														"zone": "landing",
+														"container": "dlc-pae",
+														"source": "axionCard",
+														"path": "current"
+													}
+												},
+												"linkedServiceName": {
+													"referenceName": "[parameters('AzureDatabricksPAE')]",
+													"type": "LinkedServiceReference"
+												}
+											},
+											{
+												"name": "DeleteLandingFileFalse",
+												"type": "Delete",
+												"dependsOn": [
+													{
+														"activity": "CopyFileToHistoryFalse",
+														"dependencyConditions": [
+															"Succeeded"
+														]
+													}
+												],
+												"policy": {
+													"timeout": "7.00:00:00",
+													"retry": 0,
+													"retryIntervalInSeconds": 30,
+													"secureOutput": false,
+													"secureInput": false
+												},
+												"userProperties": [],
+												"typeProperties": {
+													"dataset": {
+														"referenceName": "parquet_sink",
+														"type": "DatasetReference",
+														"parameters": {
+															"filename": {
+																"value": "@replace(replace(item().name,'.csv', ''), ' ', '')",
+																"type": "Expression"
+															},
+															"source": "axionCard",
+															"container": "dlc-pae",
+															"zone": "landing",
+															"path": "current"
+														}
+													},
+													"enableLogging": false,
+													"storeSettings": {
+														"type": "AzureBlobFSReadSettings",
+														"recursive": true
+													}
+												}
+											},
+											{
+												"name": "CopyFileToHistoryFalse",
+												"type": "Copy",
+												"dependsOn": [
+													{
+														"activity": "WriteDirectlyToStructured",
+														"dependencyConditions": [
+															"Succeeded"
+														]
+													}
+												],
+												"policy": {
+													"timeout": "7.00:00:00",
+													"retry": 0,
+													"retryIntervalInSeconds": 30,
+													"secureOutput": false,
+													"secureInput": false
+												},
+												"userProperties": [],
+												"typeProperties": {
+													"source": {
+														"type": "ParquetSource",
+														"storeSettings": {
+															"type": "AzureBlobFSReadSettings",
+															"recursive": true
+														}
+													},
+													"sink": {
+														"type": "ParquetSink",
+														"storeSettings": {
+															"type": "AzureBlobFSWriteSettings"
+														}
+													},
+													"enableStaging": false,
+													"enableSkipIncompatibleRow": true
+												},
+												"inputs": [
+													{
+														"referenceName": "parquet_sink",
+														"type": "DatasetReference",
+														"parameters": {
+															"filename": {
+																"value": "@replace(replace(item().name,'.csv', ''), ' ', '')",
+																"type": "Expression"
+															},
+															"source": "axionCard",
+															"container": "dlc-pae",
+															"zone": "landing",
+															"path": "current"
+														}
+													}
+												],
+												"outputs": [
+													{
+														"referenceName": "parquet_sink",
+														"type": "DatasetReference",
+														"parameters": {
+															"filename": {
+																"value": "@replace(replace(item().name,'.txt', ''), ' ', '')",
+																"type": "Expression"
+															},
+															"source": "axionCard",
+															"container": "dlc-pae",
+															"zone": "landing",
+															"path": "history"
+														}
+													}
+												]
+											},
+											{
+												"name": "DeleteSourceFileFalse",
+												"type": "Delete",
+												"dependsOn": [
+													{
+														"activity": "CopyFileToSourceHistoryFalse",
+														"dependencyConditions": [
+															"Succeeded"
+														]
+													}
+												],
+												"policy": {
+													"timeout": "7.00:00:00",
+													"retry": 0,
+													"retryIntervalInSeconds": 30,
+													"secureOutput": false,
+													"secureInput": false
+												},
+												"userProperties": [],
+												"typeProperties": {
+													"dataset": {
+														"referenceName": "AxionCard_file",
+														"type": "DatasetReference",
+														"parameters": {
+															"filename": {
+																"value": "@item().name",
+																"type": "Expression"
+															}
+														}
+													},
+													"enableLogging": false,
+													"storeSettings": {
+														"type": "FileServerReadSettings",
+														"recursive": false
+													}
+												}
+											},
+											{
+												"name": "CopyFileToSourceHistoryFalse",
+												"type": "Copy",
+												"dependsOn": [
+													{
+														"activity": "WriteDirectlyToStructured",
+														"dependencyConditions": [
+															"Succeeded"
+														]
+													}
+												],
+												"policy": {
+													"timeout": "7.00:00:00",
+													"retry": 0,
+													"retryIntervalInSeconds": 30,
+													"secureOutput": false,
+													"secureInput": false
+												},
+												"userProperties": [],
+												"typeProperties": {
+													"source": {
+														"type": "DelimitedTextSource",
+														"storeSettings": {
+															"type": "FileServerReadSettings",
+															"recursive": true,
+															"enablePartitionDiscovery": false
+														},
+														"formatSettings": {
+															"type": "DelimitedTextReadSettings"
+														}
+													},
+													"sink": {
+														"type": "DelimitedTextSink",
+														"storeSettings": {
+															"type": "FileServerWriteSettings"
+														},
+														"formatSettings": {
+															"type": "DelimitedTextWriteSettings",
+															"quoteAllText": true,
+															"fileExtension": ".txt"
+														}
+													},
+													"enableStaging": false,
+													"enableSkipIncompatibleRow": true
+												},
+												"inputs": [
+													{
+														"referenceName": "AxionCard_file",
+														"type": "DatasetReference",
+														"parameters": {
+															"filename": {
+																"value": "@item().name",
+																"type": "Expression"
+															}
+														}
+													}
+												],
+												"outputs": [
+													{
+														"referenceName": "AxionCard_file",
+														"type": "DatasetReference",
+														"parameters": {
+															"filename": {
+																"value": "@concat('history\\', item().name)",
+																"type": "Expression"
+															}
+														}
+													}
+												]
+											}
+										],
+										"ifTrueActivities": [
+											{
+												"name": "WriteToStructured",
+												"type": "DatabricksNotebook",
+												"dependsOn": [],
+												"policy": {
+													"timeout": "7.00:00:00",
+													"retry": 0,
+													"retryIntervalInSeconds": 30,
+													"secureOutput": false,
+													"secureInput": false
+												},
+												"userProperties": [],
+												"typeProperties": {
+													"notebookPath": "/Shared/AxionCard/axionCardFileTransform",
+													"baseParameters": {
+														"filename": {
+															"value": "@toLower(replace(item().name,'.csv', '.parquet'))",
+															"type": "Expression"
+														},
+														"source": "axionCard",
+														"container": "dlc-pae",
+														"zone": "landing",
+														"path": "current"
+													}
+												},
+												"linkedServiceName": {
+													"referenceName": "[parameters('AzureDatabricksPAE')]",
+													"type": "LinkedServiceReference"
+												}
+											},
+											{
+												"name": "DeleteLandingFileTrue",
+												"type": "Delete",
+												"dependsOn": [
+													{
+														"activity": "CopyFileToHistoryTrue",
+														"dependencyConditions": [
+															"Succeeded"
+														]
+													}
+												],
+												"policy": {
+													"timeout": "7.00:00:00",
+													"retry": 0,
+													"retryIntervalInSeconds": 30,
+													"secureOutput": false,
+													"secureInput": false
+												},
+												"userProperties": [],
+												"typeProperties": {
+													"dataset": {
+														"referenceName": "parquet_sink",
+														"type": "DatasetReference",
+														"parameters": {
+															"filename": {
+																"value": "@toLower(replace(item().name,'.csv', ''))",
+																"type": "Expression"
+															},
+															"source": "axionCard",
+															"container": "dlc-pae",
+															"zone": "landing",
+															"path": "current"
+														}
+													},
+													"enableLogging": false,
+													"storeSettings": {
+														"type": "AzureBlobFSReadSettings",
+														"recursive": true
+													}
+												}
+											},
+											{
+												"name": "CopyFileToHistoryTrue",
+												"type": "Copy",
+												"dependsOn": [
+													{
+														"activity": "WriteToStructured",
+														"dependencyConditions": [
+															"Succeeded"
+														]
+													}
+												],
+												"policy": {
+													"timeout": "7.00:00:00",
+													"retry": 0,
+													"retryIntervalInSeconds": 30,
+													"secureOutput": false,
+													"secureInput": false
+												},
+												"userProperties": [],
+												"typeProperties": {
+													"source": {
+														"type": "ParquetSource",
+														"storeSettings": {
+															"type": "AzureBlobFSReadSettings",
+															"recursive": true
+														}
+													},
+													"sink": {
+														"type": "ParquetSink",
+														"storeSettings": {
+															"type": "AzureBlobFSWriteSettings"
+														}
+													},
+													"enableStaging": false,
+													"enableSkipIncompatibleRow": true
+												},
+												"inputs": [
+													{
+														"referenceName": "parquet_sink",
+														"type": "DatasetReference",
+														"parameters": {
+															"filename": {
+																"value": "@toLower(replace(item().name,'.csv', ''))",
+																"type": "Expression"
+															},
+															"source": "axionCard",
+															"container": "dlc-pae",
+															"zone": "landing",
+															"path": "current"
+														}
+													}
+												],
+												"outputs": [
+													{
+														"referenceName": "parquet_sink",
+														"type": "DatasetReference",
+														"parameters": {
+															"filename": {
+																"value": "@toLower(replace(item().name,'.csv', ''))",
+																"type": "Expression"
+															},
+															"source": "axionCard",
+															"container": "dlc-pae",
+															"zone": "landing",
+															"path": "history"
+														}
+													}
+												]
+											},
+											{
+												"name": "DeleteSourceFileTrue",
+												"type": "Delete",
+												"dependsOn": [
+													{
+														"activity": "CopyFileToSourceHistoryTrue",
+														"dependencyConditions": [
+															"Succeeded"
+														]
+													}
+												],
+												"policy": {
+													"timeout": "7.00:00:00",
+													"retry": 0,
+													"retryIntervalInSeconds": 30,
+													"secureOutput": false,
+													"secureInput": false
+												},
+												"userProperties": [],
+												"typeProperties": {
+													"dataset": {
+														"referenceName": "AxionCard_file",
+														"type": "DatasetReference",
+														"parameters": {
+															"filename": {
+																"value": "@item().name",
+																"type": "Expression"
+															}
+														}
+													},
+													"enableLogging": false,
+													"storeSettings": {
+														"type": "FileServerReadSettings",
+														"recursive": false
+													}
+												}
+											},
+											{
+												"name": "CopyFileToSourceHistoryTrue",
+												"type": "Copy",
+												"dependsOn": [
+													{
+														"activity": "WriteToStructured",
+														"dependencyConditions": [
+															"Succeeded"
+														]
+													}
+												],
+												"policy": {
+													"timeout": "7.00:00:00",
+													"retry": 0,
+													"retryIntervalInSeconds": 30,
+													"secureOutput": false,
+													"secureInput": false
+												},
+												"userProperties": [],
+												"typeProperties": {
+													"source": {
+														"type": "DelimitedTextSource",
+														"storeSettings": {
+															"type": "FileServerReadSettings",
+															"recursive": true,
+															"enablePartitionDiscovery": false
+														},
+														"formatSettings": {
+															"type": "DelimitedTextReadSettings"
+														}
+													},
+													"sink": {
+														"type": "DelimitedTextSink",
+														"storeSettings": {
+															"type": "FileServerWriteSettings"
+														},
+														"formatSettings": {
+															"type": "DelimitedTextWriteSettings",
+															"quoteAllText": true,
+															"fileExtension": ".txt"
+														}
+													},
+													"enableStaging": false,
+													"enableSkipIncompatibleRow": true
+												},
+												"inputs": [
+													{
+														"referenceName": "AxionCard_file",
+														"type": "DatasetReference",
+														"parameters": {
+															"filename": {
+																"value": "@item().name",
+																"type": "Expression"
+															}
+														}
+													}
+												],
+												"outputs": [
+													{
+														"referenceName": "AxionCard_file",
+														"type": "DatasetReference",
+														"parameters": {
+															"filename": {
+																"value": "@concat('history\\', item().name)",
+																"type": "Expression"
+															}
+														}
+													}
+												]
+											}
+										]
+									}
+								}
+							]
+						}
+					}
+				],
+				"annotations": [],
+				"lastPublishTime": "2020-06-01T19:16:40Z"
+			},
+			"dependsOn": [
+				"[concat(variables('factoryId'), '/datasets/AxionCard_folder')]",
+				"[concat(variables('factoryId'), '/datasets/AxionCard_file')]",
+				"[concat(variables('factoryId'), '/datasets/parquet_sink')]",
+				"[concat(variables('factoryId'), '/datasets/Parquet_folder')]"
+			]
+		},
+		{
+			"name": "[concat(parameters('factoryName'), '/AxionCard_folder')]",
+			"type": "Microsoft.DataFactory/factories/datasets",
+			"apiVersion": "2018-06-01",
+			"properties": {
+				"linkedServiceName": {
+					"referenceName": "[parameters('AxionCardServer')]",
+					"type": "LinkedServiceReference"
+				},
+				"annotations": [],
+				"type": "DelimitedText",
+				"typeProperties": {
+					"location": {
+						"type": "FileServerLocation",
+						"folderPath": "AxionCard"
+					},
+					"columnDelimiter": ",",
+					"escapeChar": "\\",
+					"quoteChar": "\""
+				},
+				"schema": []
+			},
+			"dependsOn": []
+		},
+		{
+			"name": "[concat(parameters('factoryName'), '/AxionCard_file')]",
+			"type": "Microsoft.DataFactory/factories/datasets",
+			"apiVersion": "2018-06-01",
+			"properties": {
+				"linkedServiceName": {
+					"referenceName": "[parameters('AxionCardServer')]",
+					"type": "LinkedServiceReference"
+				},
+				"parameters": {
+					"filename": {
+						"type": "string"
+					}
+				},
+				"annotations": [],
+				"type": "DelimitedText",
+				"typeProperties": {
+					"location": {
+						"type": "FileServerLocation",
+						"fileName": {
+							"value": "@dataset().filename",
+							"type": "Expression"
+						},
+						"folderPath": "AxionCard"
+					},
+					"columnDelimiter": ",",
+					"encodingName": "WINDOWS-1252",
+					"escapeChar": "\\",
+					"quoteChar": "\""
+				},
+				"schema": []
+			},
+			"dependsOn": []
+		},
+		{
+			"name": "[concat(parameters('factoryName'), '/parquet_sink')]",
+			"type": "Microsoft.DataFactory/factories/datasets",
+			"apiVersion": "2018-06-01",
+			"properties": {
+				"linkedServiceName": {
+					"referenceName": "[parameters('AzureDataLakeComercial')]",
+					"type": "LinkedServiceReference"
+				},
+				"parameters": {
+					"filename": {
+						"type": "string"
+					},
+					"source": {
+						"type": "string"
+					},
+					"container": {
+						"type": "string"
+					},
+					"zone": {
+						"type": "string"
+					},
+					"path": {
+						"type": "string"
+					}
+				},
+				"annotations": [],
+				"type": "Parquet",
+				"typeProperties": {
+					"location": {
+						"type": "AzureBlobFSLocation",
+						"fileName": {
+							"value": "@concat(dataset().filename,'.parquet')",
+							"type": "Expression"
+						},
+						"folderPath": {
+							"value": "@concat(dataset().zone, '/', dataset().source,'/',dataset().path)",
+							"type": "Expression"
+						},
+						"fileSystem": {
+							"value": "@dataset().container",
+							"type": "Expression"
+						}
+					},
+					"compressionCodec": "snappy"
+				},
+				"schema": []
+			},
+			"dependsOn": []
+		},
+		{
+			"name": "[concat(parameters('factoryName'), '/Parquet_folder')]",
+			"type": "Microsoft.DataFactory/factories/datasets",
+			"apiVersion": "2018-06-01",
+			"properties": {
+				"linkedServiceName": {
+					"referenceName": "[parameters('AzureDataLakeComercial')]",
+					"type": "LinkedServiceReference"
+				},
+				"parameters": {
+					"source": {
+						"type": "string"
+					},
+					"container": {
+						"type": "string"
+					},
+					"zone": {
+						"type": "string"
+					}
+				},
+				"annotations": [],
+				"type": "Parquet",
+				"typeProperties": {
+					"location": {
+						"type": "AzureBlobFSLocation",
+						"folderPath": {
+							"value": "@concat(dataset().zone, '/', dataset().source)",
+							"type": "Expression"
+						},
+						"fileSystem": "dlc-pae"
+					},
+					"compressionCodec": "snappy"
+				},
+				"schema": []
+			},
+			"dependsOn": []
+		}
+	]
+}
